@@ -1,0 +1,14 @@
+# Node.js dependencies
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Environment variables
+.env
+
+# Database (if you don’t want to commit it)
+conversations.db
+
+# OS files
+.DS_Store
+Thumbs.db
