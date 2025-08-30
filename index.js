@@ -7,6 +7,7 @@ import mongoose from "mongoose";
 
 dotenv.config();
 const app = express();
+
 app.use(express.urlencoded({ extended: false }));
 
 // ===============================
@@ -18,15 +19,15 @@ mongoose
     useUnifiedTopology: true,
   })
   .then(() => console.log("✅ MongoDB connected"))
-  .catch((err) => console.error("❌ MongoDB connection error:", err.message));
+  .catch((err) => console.error("❌ MongoDB connection error:", err));
 
-const conversationSchema = new mongoose.Schema({
+const messageSchema = new mongoose.Schema({
   from: String,
   incoming: String,
   reply: String,
   timestamp: { type: Date, default: Date.now },
 });
-const Conversation = mongoose.model("Conversation", conversationSchema);
+const Message = mongoose.model("Message", messageSchema);
 
 // ===============================
 // ✅ OpenAI Setup
@@ -44,7 +45,7 @@ const client = twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
 // ✅ Root Route
 // ===============================
 app.get("/", (req, res) => {
-  res.send("✅ Joseph SMS bot is alive and running with MongoDB + pagination!");
+  res.send("✅ Joseph SMS bot is alive and stable v1.0!");
 });
 
 // ===============================
@@ -68,7 +69,7 @@ app.post("/sms", async (req, res) => {
         {
           role: "system",
           content:
-            "You are Joseph — warm, kind, sweet, lover-like man. Reply naturally, short or long as needed. Avoid emojis. Make it feel human.",
+            "You are Joseph — warm, kind, sweet lover-like man. Always human, never robotic. Reply naturally.",
         },
         { role: "user", content: incoming },
       ],
@@ -77,21 +78,28 @@ app.post("/sms", async (req, res) => {
     const reply = gptRes.choices[0].message.content.trim();
     console.log("🤖 GPT Reply:", reply);
 
+    // Save to MongoDB
+    const log = new Message({
+      from: fromNumber,
+      incoming,
+      reply,
+    });
+    await log.save();
+    console.log("🗄️ Conversation logged in MongoDB");
+
     // Word count → delay ranges
     const wordCount = reply.split(/\s+/).length;
     let min, max;
     if (wordCount < 12) {
-      min = 30;
-      max = 60;
+      min = 30; max = 60;
     } else if (wordCount <= 25) {
-      min = 45;
-      max = 90;
+      min = 45; max = 90;
     } else {
-      min = 60;
-      max = 120;
+      min = 60; max = 120;
     }
     const delay = Math.floor(Math.random() * (max - min + 1) + min) * 1000;
 
+    // Send delayed reply
     setTimeout(async () => {
       try {
         await client.messages.create({
@@ -99,15 +107,7 @@ app.post("/sms", async (req, res) => {
           to: fromNumber,
           body: reply,
         });
-
-        // Save to DB
-        await Conversation.create({
-          from: fromNumber,
-          incoming,
-          reply,
-        });
-
-        console.log(`✅ Reply sent after ${delay / 1000}s (${wordCount} words)`);
+        console.log(`✅ Sent reply after ${delay / 1000}s`);
       } catch (err) {
         console.error("❌ Error sending delayed SMS:", err.message);
       }
@@ -115,37 +115,6 @@ app.post("/sms", async (req, res) => {
 
   } catch (err) {
     console.error("❌ Error in /sms:", err.message);
-  }
-});
-
-// ===============================
-// ✅ History Endpoint with Pagination
-// ===============================
-app.get("/history", async (req, res) => {
-  try {
-    const { from } = req.query;
-    const page = parseInt(req.query.page) || 1; // default: page 1
-    const limit = parseInt(req.query.limit) || 20; // default: 20 messages per page
-
-    const filter = from ? { from } : {};
-
-    const history = await Conversation.find(filter)
-      .sort({ timestamp: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit);
-
-    const total = await Conversation.countDocuments(filter);
-
-    res.json({
-      page,
-      limit,
-      total,
-      totalPages: Math.ceil(total / limit),
-      messages: history,
-    });
-  } catch (err) {
-    console.error("❌ Error fetching history:", err.message);
-    res.status(500).json({ error: "Failed to fetch history" });
   }
 });
 
