@@ -2,23 +2,98 @@ import express from "express";
 import dotenv from "dotenv";
 import OpenAI from "openai";
 import twilio from "twilio";
+import { MongoClient } from "mongodb";
 
 dotenv.config();
 const app = express();
-
 app.use(express.urlencoded({ extended: false }));
 
-// OpenAI setup
+// ✅ OpenAI setup
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Twilio client
+// ✅ Twilio client
 const client = twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
 
-// ✅ Root route (for Render health check)
+// ✅ MongoDB setup
+const mongoClient = new MongoClient(process.env.MONGO_URI);
+let conversations;
+
+(async () => {
+  try {
+    await mongoClient.connect();
+    const db = mongoClient.db("joseph_bot"); // database name
+    conversations = db.collection("conversations"); // collection name
+    console.log("✅ Connected to MongoDB");
+  } catch (err) {
+    console.error("❌ MongoDB connection error:", err.message);
+  }
+})();
+
+// ✅ Root route
 app.get("/", (req, res) => {
-  res.send("✅ Joseph SMS bot is alive and running!");
+  res.send("✅ Joseph SMS bot is alive with long-term memory!");
+});
+
+// ✅ Debug route: view chat history
+app.get("/history", async (req, res) => {
+  try {
+    const phone = req.query.phone; // e.g. /history?phone=+14045944455
+    const query = phone ? { from: phone } : {};
+
+    const allConvos = await conversations
+      .find(query)
+      .sort({ timestamp: -1 })
+      .limit(50)
+      .toArray();
+
+    res.json(allConvos);
+  } catch (err) {
+    res.status(500).send("❌ Error fetching history");
+    console.error("❌ Error fetching history:", err.message);
+  }
+});
+
+// ✅ Admin route: clear chat history
+app.post("/clear-history", async (req, res) => {
+  try {
+    const key = req.query.key; // pass as ?key=supersecret123
+    if (key !== process.env.ADMIN_KEY) {
+      return res.status(403).send("❌ Unauthorized");
+    }
+
+    const phone = req.query.phone; // optional, clear just one number
+    const query = phone ? { from: phone } : {};
+
+    const result = await conversations.deleteMany(query);
+    res.send(`🗑️ Cleared ${result.deletedCount} messages`);
+  } catch (err) {
+    res.status(500).send("❌ Error clearing history");
+    console.error("❌ Error clearing history:", err.message);
+  }
+});
+
+// ✅ Stats route: get bot metrics
+app.get("/stats", async (req, res) => {
+  try {
+    const totalMessages = await conversations.countDocuments({});
+    const totalUsers = await conversations.distinct("from");
+    const lastMessage = await conversations
+      .find({})
+      .sort({ timestamp: -1 })
+      .limit(1)
+      .toArray();
+
+    res.json({
+      total_messages: totalMessages,
+      total_users: totalUsers.length,
+      last_active: lastMessage[0]?.timestamp || null,
+    });
+  } catch (err) {
+    res.status(500).send("❌ Error fetching stats");
+    console.error("❌ Error fetching stats:", err.message);
+  }
 });
 
 // ✅ SMS Webhook
@@ -28,18 +103,33 @@ app.post("/sms", async (req, res) => {
     const fromNumber = req.body.From;
     console.log("📩 Incoming SMS:", incoming);
 
-    // Silent 200 OK so Twilio doesn’t retry
+    // Ack Twilio instantly
     res.status(200).end();
 
-    // Generate Joseph-style reply
+    // Retrieve last 10 messages from MongoDB
+    const history = await conversations
+      .find({ from: fromNumber })
+      .sort({ timestamp: -1 })
+      .limit(10)
+      .toArray();
+
+    const context = history
+      .reverse() // oldest → newest
+      .map((h) => ({
+        role: h.role,
+        content: h.message,
+      }));
+
+    // Call GPT with context
     const gptRes = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
           content:
-            "You are Joseph — warm, kind, sweet, and a love-like man. Speak naturally, as if you are texting from the heart. Be thoughtful, romantic when it fits, and always personal. Never sound robotic.",
+            "You are Joseph — warm, kind, romantic, lover-like, natural. Never robotic. Reply in a human-like way.",
         },
+        ...context,
         { role: "user", content: incoming },
       ],
     });
@@ -47,91 +137,55 @@ app.post("/sms", async (req, res) => {
     const reply = gptRes.choices[0].message.content.trim();
     console.log("🤖 Joseph Reply:", reply);
 
-    // Word count for smart delay
-    const wordCount = reply.split(/\s+/).length;
+    // Save incoming + reply
+    await conversations.insertOne({
+      from: fromNumber,
+      role: "user",
+      message: incoming,
+      timestamp: new Date(),
+    });
+    await conversations.insertOne({
+      from: fromNumber,
+      role: "assistant",
+      message: reply,
+      timestamp: new Date(),
+    });
 
+    // Pick delay (human-like)
+    const wordCount = reply.split(/\s+/).length;
     let min, max;
     if (wordCount < 12) {
-      min = parseInt(process.env.REPLY_DELAY_SHORT_MIN || "30", 10);
-      max = parseInt(process.env.REPLY_DELAY_SHORT_MAX || "60", 10);
+      min = 30;
+      max = 60;
     } else if (wordCount <= 25) {
-      min = parseInt(process.env.REPLY_DELAY_MED_MIN || "45", 10);
-      max = parseInt(process.env.REPLY_DELAY_MED_MAX || "90", 10);
+      min = 45;
+      max = 90;
     } else {
-      min = parseInt(process.env.REPLY_DELAY_LONG_MIN || "60", 10);
-      max = parseInt(process.env.REPLY_DELAY_LONG_MAX || "120", 10);
+      min = 60;
+      max = 120;
     }
+    const delay = Math.floor(Math.random() * (max - min + 1) + min) * 1000;
 
-    let delay = Math.floor(Math.random() * (max - min + 1) + min) * 1000;
-
-    // 💡 20% chance Joseph takes a long pause (2–3 minutes)
-    if (Math.random() < 0.2) {
-      delay = Math.floor(Math.random() * (180 - 120 + 1) + 120) * 1000;
-      console.log("⏳ Joseph is taking his time (long pause).");
-    }
-
-    // 💡 25% chance Joseph double-texts, but only if reply is long
-    if (wordCount > 25 && Math.random() < 0.25) {
-      const words = reply.split(" ");
-      const splitIndex = Math.floor(words.length / 2);
-      const firstPart = words.slice(0, splitIndex).join(" ");
-      const secondPart = words.slice(splitIndex).join(" ");
-
-      console.log("✌️ Joseph will double-text this one.");
-
-      // Send first part
-      setTimeout(async () => {
-        try {
-          await client.messages.create({
-            from: process.env.TWILIO_NUMBER,
-            to: fromNumber,
-            body: firstPart,
-          });
-          console.log(`✅ Sent first half after ${delay / 1000}s`);
-        } catch (err) {
-          console.error("❌ Error sending first half:", err.message);
-        }
-      }, delay);
-
-      // Send second part 30–60s later
-      const followUpDelay = Math.floor(Math.random() * (60 - 30 + 1) + 30) * 1000;
-      setTimeout(async () => {
-        try {
-          await client.messages.create({
-            from: process.env.TWILIO_NUMBER,
-            to: fromNumber,
-            body: secondPart,
-          });
-          console.log(
-            `✅ Sent second half after ${(delay + followUpDelay) / 1000}s`
-          );
-        } catch (err) {
-          console.error("❌ Error sending second half:", err.message);
-        }
-      }, delay + followUpDelay);
-
-    } else {
-      // Normal single message
-      setTimeout(async () => {
-        try {
-          await client.messages.create({
-            from: process.env.TWILIO_NUMBER,
-            to: fromNumber,
-            body: reply,
-          });
-          console.log(`✅ Sent reply after ${delay / 1000}s (${wordCount} words)`);
-        } catch (err) {
-          console.error("❌ Error sending delayed SMS:", err.message);
-        }
-      }, delay);
-    }
+    // Send delayed reply
+    setTimeout(async () => {
+      try {
+        await client.messages.create({
+          from: process.env.TWILIO_NUMBER,
+          to: fromNumber,
+          body: reply,
+        });
+        console.log(`✅ Sent reply after ${delay / 1000}s`);
+      } catch (err) {
+        console.error("❌ Error sending SMS:", err.message);
+      }
+    }, delay);
 
   } catch (err) {
     console.error("❌ Error in /sms:", err.message);
   }
 });
 
-// Start server
+// ✅ Start server
 app.listen(process.env.PORT || 3000, () => {
   console.log(`🚀 Server running on port ${process.env.PORT || 3000}`);
 });
