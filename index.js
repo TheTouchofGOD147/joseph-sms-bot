@@ -10,47 +10,35 @@ const app = express();
 
 app.use(express.urlencoded({ extended: false }));
 
-// ===============================
-// ✅ MongoDB Setup
-// ===============================
+// MongoDB connect
 mongoose
-  .connect(process.env.MONGO_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
+  .connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => console.log("✅ MongoDB connected"))
-  .catch((err) => console.error("❌ MongoDB connection error:", err));
+  .catch((err) => console.error("❌ MongoDB connection error:", err.message));
 
-const messageSchema = new mongoose.Schema({
+// Conversation Schema
+const conversationSchema = new mongoose.Schema({
   from: String,
-  incoming: String,
+  message: String,
   reply: String,
   timestamp: { type: Date, default: Date.now },
 });
-const Message = mongoose.model("Message", messageSchema);
+const Conversation = mongoose.model("Conversation", conversationSchema);
 
-// ===============================
-// ✅ OpenAI Setup
-// ===============================
+// OpenAI setup
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ===============================
-// ✅ Twilio Setup
-// ===============================
+// Twilio client
 const client = twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
 
-// ===============================
-// ✅ Root Route
-// ===============================
+// ✅ Root route
 app.get("/", (req, res) => {
-  res.send("✅ Joseph SMS bot is alive and stable v1.0!");
+  res.send("✅ Joseph SMS bot is alive and running!");
 });
 
-// ===============================
 // ✅ SMS Webhook
-// ===============================
 app.post("/sms", async (req, res) => {
   try {
     const incoming = req.body.Body;
@@ -59,6 +47,7 @@ app.post("/sms", async (req, res) => {
 
     // Ack immediately so Twilio doesn’t retry
     const twiml = new MessagingResponse();
+    twiml.message("📨 Message received, Joseph will reply soon...");
     res.type("text/xml");
     res.send(twiml.toString());
 
@@ -68,8 +57,13 @@ app.post("/sms", async (req, res) => {
       messages: [
         {
           role: "system",
-          content:
-            "You are Joseph — warm, kind, sweet lover-like man. Always human, never robotic. Reply naturally.",
+          content: `
+You are Joseph — a warm, kind, sweet, lover-like man.
+No matter what the user writes (even if they mention computers, code, or deployment),
+you never reply with technical or robotic language.
+You reinterpret everything in a loving, human way — always tender, romantic, and caring.
+You never break character. Avoid emojis. Keep it natural and heartfelt.
+          `,
         },
         { role: "user", content: incoming },
       ],
@@ -78,26 +72,27 @@ app.post("/sms", async (req, res) => {
     const reply = gptRes.choices[0].message.content.trim();
     console.log("🤖 GPT Reply:", reply);
 
-    // Save to MongoDB
-    const log = new Message({
-      from: fromNumber,
-      incoming,
-      reply,
-    });
-    await log.save();
-    console.log("🗄️ Conversation logged in MongoDB");
-
-    // Word count → delay ranges
+    // Word count
     const wordCount = reply.split(/\s+/).length;
+
+    // Pick delay range
     let min, max;
     if (wordCount < 12) {
-      min = 30; max = 60;
+      min = 30;
+      max = 60;
     } else if (wordCount <= 25) {
-      min = 45; max = 90;
+      min = 45;
+      max = 90;
     } else {
-      min = 60; max = 120;
+      min = 60;
+      max = 120;
     }
+
     const delay = Math.floor(Math.random() * (max - min + 1) + min) * 1000;
+
+    // Save to DB
+    const convo = new Conversation({ from: fromNumber, message: incoming, reply });
+    await convo.save();
 
     // Send delayed reply
     setTimeout(async () => {
@@ -107,7 +102,7 @@ app.post("/sms", async (req, res) => {
           to: fromNumber,
           body: reply,
         });
-        console.log(`✅ Sent reply after ${delay / 1000}s`);
+        console.log(`✅ Sent reply after ${delay / 1000}s (${wordCount} words)`);
       } catch (err) {
         console.error("❌ Error sending delayed SMS:", err.message);
       }
@@ -118,10 +113,7 @@ app.post("/sms", async (req, res) => {
   }
 });
 
-// ===============================
-// ✅ Start Server
-// ===============================
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+// Start server
+app.listen(process.env.PORT || 3000, () => {
+  console.log(`🚀 Server running on port ${process.env.PORT || 3000}`);
 });
